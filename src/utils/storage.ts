@@ -1,8 +1,8 @@
 import { AppDatabase } from '../types';
 import { INITIAL_DB } from '../initialData';
 
-const LOCAL_STORAGE_KEY = 'hi_credit_sub_hub_db_v1';
-const CLOUD_CONFIG_KEY = 'hi_credit_cloud_config_v1';
+const LOCAL_STORAGE_KEY = 'hi_credit_sub_hub_db_v2';
+const CLOUD_CONFIG_KEY = 'hi_credit_cloud_config_v2';
 
 export interface CloudSyncConfig {
   gistId: string;
@@ -15,9 +15,7 @@ export const DEFAULT_CLOUD_GIST_ID = '10ac81dcf7df61f3c7957fb0e92f6375';
 export function loadCloudConfig(): CloudSyncConfig {
   try {
     const raw = localStorage.getItem(CLOUD_CONFIG_KEY);
-    if (raw) {
-      return JSON.parse(raw);
-    }
+    if (raw) return JSON.parse(raw);
   } catch {
     // ignore
   }
@@ -29,25 +27,22 @@ export function saveCloudConfig(cfg: CloudSyncConfig): void {
 }
 
 export function encodeDbToHash(db: AppDatabase): string {
-  const json = JSON.stringify(db);
-  return btoa(encodeURIComponent(json));
+  return btoa(encodeURIComponent(JSON.stringify(db)));
 }
 
 export function decodeDbFromHash(encoded: string): AppDatabase | null {
   try {
-    const json = decodeURIComponent(atob(encoded));
-    const parsed = JSON.parse(json) as AppDatabase;
-    if (parsed && Array.isArray(parsed.cards) && Array.isArray(parsed.mvnos)) {
+    const parsed = JSON.parse(decodeURIComponent(atob(encoded))) as AppDatabase;
+    if (parsed && parsed.version === 2 && Array.isArray(parsed.cards)) {
       return parsed;
     }
-  } catch (e) {
-    console.warn('Failed to decode sync hash', e);
+  } catch {
+    // ignore
   }
   return null;
 }
 
 export function loadLocalDb(): AppDatabase {
-  // Check if URL has #sync=... first
   if (typeof window !== 'undefined' && window.location.hash.startsWith('#sync=')) {
     const encoded = window.location.hash.replace('#sync=', '');
     const syncedDb = decodeDbFromHash(encoded);
@@ -62,12 +57,12 @@ export function loadLocalDb(): AppDatabase {
     const raw = localStorage.getItem(LOCAL_STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as AppDatabase;
-      if (parsed && Array.isArray(parsed.cards) && Array.isArray(parsed.mvnos)) {
+      if (parsed && parsed.version === 2 && Array.isArray(parsed.cards)) {
         return parsed;
       }
     }
-  } catch (e) {
-    console.warn('Failed to parse localStorage DB, using INITIAL_DB', e);
+  } catch {
+    // ignore
   }
   return INITIAL_DB;
 }
@@ -77,46 +72,40 @@ export async function fetchDiskDb(): Promise<AppDatabase | null> {
     const res = await fetch('./api/storage');
     if (res.ok) {
       const data = (await res.json()) as AppDatabase;
-      if (data && Array.isArray(data.cards)) {
+      if (data && data.version === 2 && Array.isArray(data.cards)) {
         localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(data));
         return data;
       }
     }
   } catch {
-    // Ignore when running on Galaxy APK or GitHub Pages
+    // ignore
   }
   return null;
 }
 
 export async function pullFromCloudGist(gistId: string, token?: string): Promise<AppDatabase | null> {
   if (!gistId.trim()) return null;
-  const headers: Record<string, string> = {
-    Accept: 'application/vnd.github+json',
-  };
-  if (token && token.trim()) {
-    headers.Authorization = `Bearer ${token.trim()}`;
-  }
+  const headers: Record<string, string> = { Accept: 'application/vnd.github+json' };
+  if (token && token.trim()) headers.Authorization = `Bearer ${token.trim()}`;
+
   const res = await fetch(`https://api.github.com/gists/${gistId.trim()}`, {
     headers,
     cache: 'no-store',
   });
-  if (!res.ok) {
-    throw new Error(`클라우드 조회 실패 (${res.status})`);
-  }
+  if (!res.ok) throw new Error(`클라우드 조회 실패 (${res.status})`);
+
   const gist = await res.json();
   const fileObj =
     gist.files?.['hi-credit-db.json'] ||
-    gist.files?.['storage.json'] ||
-    Object.values(gist.files || {})[0] as any;
-  if (!fileObj || !fileObj.content) {
-    throw new Error('클라우드 Gist에 데이터 파일이 없습니다.');
-  }
+    (Object.values(gist.files || {})[0] as any);
+  if (!fileObj || !fileObj.content) throw new Error('클라우드 파일이 없습니다.');
+
   const parsed = JSON.parse(fileObj.content) as AppDatabase;
-  if (parsed && Array.isArray(parsed.cards)) {
+  if (parsed && parsed.version === 2 && Array.isArray(parsed.cards)) {
     localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(parsed));
     return parsed;
   }
-  throw new Error('데이터 포맷이 올바르지 않습니다.');
+  return null;
 }
 
 export async function pushToCloudGist(
@@ -124,39 +113,28 @@ export async function pushToCloudGist(
   gistId: string,
   token: string
 ): Promise<string> {
-  if (!token.trim()) {
-    throw new Error('클라우드 저장 권한(GitHub Token)을 입력해주세요.');
-  }
-  const headers: Record<string, string> = {
-    Accept: 'application/vnd.github+json',
-    Authorization: `Bearer ${token.trim()}`,
-    'Content-Type': 'application/json',
-  };
-
-  const payload = {
-    description: 'Hi-Credit Galaxy App Cloud Sync Database',
-    public: false,
-    files: {
-      'hi-credit-db.json': {
-        content: JSON.stringify(db, null, 2),
+  if (!token.trim()) throw new Error('GitHub Token을 입력해주세요.');
+  const res = await fetch(
+    gistId.trim()
+      ? `https://api.github.com/gists/${gistId.trim()}`
+      : 'https://api.github.com/gists',
+    {
+      method: gistId.trim() ? 'PATCH' : 'POST',
+      headers: {
+        Accept: 'application/vnd.github+json',
+        Authorization: `Bearer ${token.trim()}`,
+        'Content-Type': 'application/json',
       },
-    },
-  };
-
-  const url = gistId.trim()
-    ? `https://api.github.com/gists/${gistId.trim()}`
-    : 'https://api.github.com/gists';
-  const method = gistId.trim() ? 'PATCH' : 'POST';
-
-  const res = await fetch(url, {
-    method,
-    headers,
-    body: JSON.stringify(payload),
-  });
-
-  if (!res.ok) {
-    throw new Error(`클라우드 업로드 실패 (${res.status})`);
-  }
+      body: JSON.stringify({
+        description: 'Hi-Credit Galaxy App Cloud Sync Database',
+        public: false,
+        files: {
+          'hi-credit-db.json': { content: JSON.stringify(db, null, 2) },
+        },
+      }),
+    }
+  );
+  if (!res.ok) throw new Error(`업로드 실패 (${res.status})`);
   const data = await res.json();
   return data.id as string;
 }
@@ -168,11 +146,10 @@ export async function saveDbEverywhere(db: AppDatabase): Promise<boolean> {
   };
   try {
     localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(updated));
-  } catch (e) {
-    console.error('Failed to save to localStorage', e);
+  } catch {
+    // ignore
   }
 
-  // Try syncing to Cloud Gist if token + gistId are configured on device
   const cloudCfg = loadCloudConfig();
   if (cloudCfg.gistId && cloudCfg.githubToken) {
     pushToCloudGist(updated, cloudCfg.gistId, cloudCfg.githubToken).catch(() => {});

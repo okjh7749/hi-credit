@@ -6,17 +6,14 @@ import {
   CloudUpload,
   Copy,
   Download,
-  FileText,
   Link2,
   RotateCcw,
   Smartphone,
-  Sparkles,
   Upload,
   X,
 } from 'lucide-react';
-import { RAW_KAKAO_MEMO } from '../initialData';
 import { AppDatabase } from '../types';
-import { parseFreeformMemo } from '../utils/memoParser';
+import { calcCardDates, shortDate } from '../utils/dateUtils';
 import {
   DEFAULT_CLOUD_GIST_ID,
   encodeDbToHash,
@@ -28,27 +25,28 @@ import {
 
 interface SmartMemoModalProps {
   db: AppDatabase;
+  refDate: string;
+  pwaPrompt: any;
+  onTriggerPwaInstall: () => void;
   onClose: () => void;
-  onImportParsed: (parsed: ReturnType<typeof parseFreeformMemo>) => void;
   onRestoreFullDb: (newDb: AppDatabase) => void;
   onResetToInitial: () => void;
 }
 
-export const APK_DOWNLOAD_URL =
-  'https://github.com/okjh7749/hi-credit/releases/latest/download/hi-credit-galaxy.apk';
+// Same-origin direct APK path on GitHub Pages (avoids GitHub Release S3 redirect blocks in mobile browsers)
+export const APK_DIRECT_URL = 'https://okjh7749.github.io/hi-credit/hi-credit.apk';
 export const CLOUD_WEB_URL = 'https://okjh7749.github.io/hi-credit/';
 
 export const SmartMemoModal: React.FC<SmartMemoModalProps> = ({
   db,
+  refDate,
+  pwaPrompt,
+  onTriggerPwaInstall,
   onClose,
-  onImportParsed,
   onRestoreFullDb,
   onResetToInitial,
 }) => {
-  const [activeMode, setActiveMode] = useState<
-    'cloud' | 'export-text' | 'import-memo' | 'backup'
-  >('cloud');
-  const [memoInput, setMemoInput] = useState('');
+  const [tab, setTab] = useState<'cloud' | 'kakao' | 'backup'>('cloud');
   const [copied, setCopied] = useState(false);
   const [syncLinkCopied, setSyncLinkCopied] = useState(false);
 
@@ -64,70 +62,59 @@ export const SmartMemoModal: React.FC<SmartMemoModalProps> = ({
 
   const generateKakaoSummary = (): string => {
     const lines: string[] = [];
-    lines.push('[카드 신규이벤트 / 해지금지 정리]');
     db.cards.forEach((c) => {
-      if (c.status === 'target') {
-        lines.push(`- [타겟대기] ${c.issuer} (${c.cardName})`);
-      } else if (c.status === 'locked') {
-        const lockStr = c.lockEndDateSecondary
-          ? `해지금지 -> ${c.lockEndDatePrimary} or ${c.lockEndDateSecondary}`
-          : `해지금지 -> ${c.lockEndDatePrimary || '미정'}`;
-        lines.push(`- ${c.cardName} (${c.issueDate || '-'} 발급 / ${lockStr})`);
-      } else {
+      const calc = calcCardDates(c, refDate);
+      if (calc.lockEndDate) {
         lines.push(
-          `- ${c.cardName} [${
-            c.status === 'cancellable' ? '해지가능' : '쿨타임'
-          }] 마지막사용: ${c.lastUsedDate || '-'} ${
-            c.clawbackRule ? `(${c.clawbackRule})` : ''
-          }`
+          `${c.issuer} ${c.name} ${shortDate(c.issueDate)} 발급 (혜택제공 M+${
+            c.keepMonths
+          } 해지금지 -> ${shortDate(calc.lockEndDate)})`
         );
+      } else if (c.lastUsedDate) {
+        lines.push(
+          `${c.issuer} ${calc.status} ${shortDate(c.lastUsedDate)} 마지막사용 (무사용 ${
+            c.noUseMonths
+          }M -> ${shortDate(calc.noUseEndDate)})`
+        );
+      } else {
+        lines.push(`${c.issuer}`);
       }
     });
 
-    lines.push('\n[자동이체 / AI 구독 정리]');
+    lines.push('\n자동이체정리');
     const grouped: Record<string, typeof db.transfers> = {};
-    db.transfers
-      .filter((t) => t.isActive)
-      .forEach((t) => {
-        const g = t.paymentMethod || '기타';
-        if (!grouped[g]) grouped[g] = [];
-        grouped[g].push(t);
-      });
-
-    Object.entries(grouped).forEach(([group, list]) => {
-      lines.push(`${group}`);
-      list.forEach((t, idx) => {
-        const amtStr =
-          t.currency === 'USD'
-            ? `$${t.amount}`
-            : `${t.amount.toLocaleString()}원`;
-        const dayStr = t.billingDay ? ` / ${t.billingDay}일` : '';
-        lines.push(`${idx + 1}. ${t.title} ${amtStr}${dayStr}`);
+    db.transfers.forEach((t) => {
+      const g = t.category || '기타';
+      if (!grouped[g]) grouped[g] = [];
+      grouped[g].push(t);
+    });
+    Object.entries(grouped).forEach(([cat, list]) => {
+      lines.push(cat);
+      list.forEach((t, i) => {
+        const dayStr = t.billingDay ? ` /${t.billingDay}일` : '';
+        lines.push(`${i + 1}. ${t.title} ${t.amount}${dayStr}`);
       });
     });
 
-    lines.push('\n[알뜰폰 회선 정리]');
-    db.mvnos
-      .filter((m) => m.isActive)
-      .forEach((m) => {
-        lines.push(
-          `- ${m.provider} (${m.lineLabel} / ${m.simType}${
-            m.phoneTail ? ` / ${m.phoneTail}` : ''
-          }) ${m.joinDate} 가입 | 월 ${m.currentFee.toLocaleString()}원${
-            m.priceJumpDate
-              ? ` -> ${m.priceJumpDate.slice(0, 7)}부터 ${(
-                  m.afterFee || 0
-                ).toLocaleString()}원`
-              : ''
-          }${m.monthlyPerks ? ` + ${m.monthlyPerks}` : ''}`
-        );
-      });
+    lines.push('');
+    db.mvnos.forEach((m) => {
+      lines.push(
+        `${m.provider} ${shortDate(m.joinDate)} 가입 ${m.lineName}\n${
+          m.currentFee
+        }${
+          m.jumpDate
+            ? `\n${m.jumpDate.slice(2, 7).replace('-', '년 ')}월 ${
+                m.jumpFee ? m.jumpFee / 10000 + '만' : ''
+              }`
+            : ''
+        }${m.benefit ? ` + ${m.benefit}` : ''}\n`
+      );
+    });
 
-    return lines.join('\n');
+    return lines.join('\n').trim();
   };
 
   const summaryText = generateKakaoSummary();
-  const previewParsed = memoInput.trim() ? parseFreeformMemo(memoInput) : null;
 
   const handleCopy = async (text: string) => {
     await navigator.clipboard.writeText(text);
@@ -146,12 +133,14 @@ export const SmartMemoModal: React.FC<SmartMemoModalProps> = ({
   const handleCloudPull = async () => {
     try {
       setCloudLoading(true);
-      setCloudStatus('클라우드에서 데이터를 불러오는 중...');
+      setCloudStatus('클라우드에서 불러오는 중...');
       saveCloudConfig({ gistId, githubToken });
       const pulled = await pullFromCloudGist(gistId, githubToken);
       if (pulled) {
         onRestoreFullDb(pulled);
-        setCloudStatus('✅ 클라우드 데이터 동기화(불러오기) 완료!');
+        setCloudStatus('✅ 클라우드 데이터 동기화 완료!');
+      } else {
+        setCloudStatus('⚠️ 클라우드에 v2 포맷 데이터가 아직 없습니다.');
       }
     } catch (e: any) {
       setCloudStatus(`❌ ${e?.message || '불러오기 실패'}`);
@@ -163,7 +152,7 @@ export const SmartMemoModal: React.FC<SmartMemoModalProps> = ({
   const handleCloudPush = async () => {
     try {
       setCloudLoading(true);
-      setCloudStatus('클라우드에 업로드 중...');
+      setCloudStatus('클라우드에 저장 중...');
       const newGistId = await pushToCloudGist(db, gistId, githubToken);
       setGistId(newGistId);
       saveCloudConfig({
@@ -171,7 +160,7 @@ export const SmartMemoModal: React.FC<SmartMemoModalProps> = ({
         githubToken,
         lastCloudSyncAt: new Date().toISOString(),
       });
-      setCloudStatus('✅ 클라우드에 최신 데이터 저장 완료!');
+      setCloudStatus('✅ 클라우드 저장 완료!');
     } catch (e: any) {
       setCloudStatus(`❌ ${e?.message || '업로드 실패'}`);
     } finally {
@@ -198,290 +187,196 @@ export const SmartMemoModal: React.FC<SmartMemoModalProps> = ({
     reader.onload = () => {
       try {
         const parsed = JSON.parse(String(reader.result)) as AppDatabase;
-        if (
-          parsed &&
-          Array.isArray(parsed.cards) &&
-          Array.isArray(parsed.mvnos)
-        ) {
+        if (parsed && Array.isArray(parsed.cards)) {
           onRestoreFullDb(parsed);
           onClose();
-        } else {
-          alert('올바른 백업 JSON 파일 형식이 아닙니다.');
         }
       } catch {
-        alert('JSON 파일을 읽는 중 오류가 발생했습니다.');
+        alert('올바른 JSON 파일이 아닙니다.');
       }
     };
     reader.readAsText(file);
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4 overflow-y-auto">
-      <div className="bg-slate-900 border-t sm:border border-slate-700 rounded-t-3xl sm:rounded-2xl max-w-2xl w-full p-5 sm:p-6 shadow-2xl max-h-[92vh] overflow-y-auto">
-        <div className="flex items-center justify-between pb-4 border-b border-slate-800">
-          <h3 className="text-base sm:text-lg font-bold text-white flex items-center gap-2">
-            <Cloud className="w-5 h-5 text-indigo-400" />
-            갤럭시 앱 · 클라우드 동기화 · 카톡 메모
+    <div className="fixed inset-0 z-50 bg-black/80 flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <div className="bg-slate-900 border-t sm:border border-slate-700 rounded-t-2xl sm:rounded-2xl max-w-lg w-full p-5 space-y-4 max-h-[90vh] overflow-y-auto">
+        <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+          <h3 className="text-base font-bold text-white flex items-center gap-2">
+            <Cloud className="w-4 h-4 text-indigo-400" />
+            갤럭시 앱 설치 &amp; 클라우드 동기화
           </h3>
-          <button
-            onClick={onClose}
-            className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800"
-          >
+          <button onClick={onClose} className="text-slate-400 hover:text-white">
             <X className="w-5 h-5" />
           </button>
         </div>
 
-        {/* Mode Tabs */}
-        <div className="flex flex-wrap gap-1.5 mt-4 mb-4">
+        <div className="flex gap-1.5">
           <button
-            onClick={() => setActiveMode('cloud')}
-            className={`px-3 py-2 rounded-xl text-xs font-bold cursor-pointer ${
-              activeMode === 'cloud'
+            onClick={() => setTab('cloud')}
+            className={`px-3 py-1.5 rounded-lg text-xs font-bold cursor-pointer ${
+              tab === 'cloud'
                 ? 'bg-indigo-600 text-white'
                 : 'bg-slate-950 text-slate-400 border border-slate-800'
             }`}
           >
-            ☁️ 클라우드 &amp; 갤럭시 APK
+            앱 설치 / 클라우드
           </button>
           <button
-            onClick={() => setActiveMode('export-text')}
-            className={`px-3 py-2 rounded-xl text-xs font-bold cursor-pointer ${
-              activeMode === 'export-text'
+            onClick={() => setTab('kakao')}
+            className={`px-3 py-1.5 rounded-lg text-xs font-bold cursor-pointer ${
+              tab === 'kakao'
                 ? 'bg-indigo-600 text-white'
                 : 'bg-slate-950 text-slate-400 border border-slate-800'
             }`}
           >
-            📋 카톡 텍스트 내보내기
+            카톡 텍스트 복사
           </button>
           <button
-            onClick={() => setActiveMode('import-memo')}
-            className={`px-3 py-2 rounded-xl text-xs font-bold cursor-pointer ${
-              activeMode === 'import-memo'
+            onClick={() => setTab('backup')}
+            className={`px-3 py-1.5 rounded-lg text-xs font-bold cursor-pointer ${
+              tab === 'backup'
                 ? 'bg-indigo-600 text-white'
                 : 'bg-slate-950 text-slate-400 border border-slate-800'
             }`}
           >
-            ✨ 메모 자동인식
-          </button>
-          <button
-            onClick={() => setActiveMode('backup')}
-            className={`px-3 py-2 rounded-xl text-xs font-bold cursor-pointer ${
-              activeMode === 'backup'
-                ? 'bg-indigo-600 text-white'
-                : 'bg-slate-950 text-slate-400 border border-slate-800'
-            }`}
-          >
-            💾 파일 백업/초기화
+            백업 / 초기화
           </button>
         </div>
 
-        {activeMode === 'cloud' && (
-          <div className="space-y-4">
-            {/* Galaxy APK & Cloud Web Links */}
-            <div className="p-4 rounded-2xl bg-gradient-to-br from-indigo-950/80 via-slate-900 to-slate-950 border border-indigo-500/40 space-y-3">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-extrabold text-indigo-300 flex items-center gap-1.5">
-                  <Smartphone className="w-4 h-4 text-indigo-400" />
-                  갤럭시 스마트폰 설치 &amp; 클라우드 접속
-                </span>
-                <span className="text-[11px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 font-bold">
-                  Android APK + PWA 지원
-                </span>
+        {tab === 'cloud' && (
+          <div className="space-y-3">
+            {/* Galaxy App Install Box */}
+            <div className="p-3.5 rounded-xl bg-slate-950 border border-indigo-500/40 space-y-2.5">
+              <div className="text-xs font-bold text-indigo-300 flex items-center gap-1.5">
+                <Smartphone className="w-4 h-4" />
+                갤럭시 스마트폰 앱 설치 (2가지 방법)
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                <a
-                  href={APK_DOWNLOAD_URL}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="flex items-center justify-center gap-2 p-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold shadow-lg shadow-indigo-600/30 transition-all"
-                >
-                  <Download className="w-4 h-4" />
-                  갤럭시 APK 다운로드 (.apk)
-                </a>
-
+              {pwaPrompt && (
                 <button
-                  onClick={handleCopySyncLink}
-                  className="flex items-center justify-center gap-2 p-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-100 border border-slate-700 text-xs font-bold transition-all cursor-pointer"
+                  onClick={onTriggerPwaInstall}
+                  className="w-full py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-extrabold flex items-center justify-center gap-2 cursor-pointer"
                 >
-                  {syncLinkCopied ? (
-                    <Check className="w-4 h-4 text-emerald-400" />
-                  ) : (
-                    <Link2 className="w-4 h-4 text-cyan-400" />
-                  )}
-                  {syncLinkCopied
-                    ? '동기화 링크 복사 완료!'
-                    : '현재 데이터 포함 클라우드 링크 복사'}
+                  <Smartphone className="w-4 h-4" />
+                  방법 1 (추천): 보안차단 없이 갤럭시 홈 화면에 앱 즉시 설치
                 </button>
+              )}
+
+              <a
+                href={APK_DIRECT_URL}
+                download="hi-credit.apk"
+                target="_blank"
+                rel="noreferrer"
+                className="w-full py-2.5 px-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-extrabold flex items-center justify-center gap-2"
+              >
+                <Download className="w-4 h-4" />
+                정식 서명 APK 직접 다운로드 (hi-credit.apk)
+              </a>
+
+              <div className="text-[11px] text-slate-400 leading-relaxed bg-slate-900 p-2.5 rounded-lg border border-slate-800">
+                💡 <strong>갤럭시에서 다운로드가 안 될 때:</strong> 카카오톡 내부 브라우저에서는 APK 다운로드가 차단될 수 있습니다. 우측 하단 <strong>[⋮] → [다른 브라우저로 열기(삼성인터넷/크롬)]</strong>를 누른 뒤 다운로드하거나 <strong>[홈 화면에 추가]</strong>를 누르면 바로 앱으로 설치됩니다!
               </div>
-              <p className="text-[11px] text-slate-400 leading-relaxed">
-                • 클라우드 웹 주소:{' '}
-                <a
-                  href={CLOUD_WEB_URL}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="text-indigo-300 underline font-mono"
-                >
-                  {CLOUD_WEB_URL}
-                </a>
-                <br />• 갤럭시에서 위 APK를 설치하거나, 삼성인터넷/크롬에서 클라우드 웹 주소 접속 후 <strong>[홈 화면에 추가]</strong>를 누르면 네이티브 앱처럼 작동합니다.
-              </p>
             </div>
 
-            {/* Cloud Gist Sync Box */}
-            <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 space-y-3">
-              <div className="flex items-center justify-between">
-                <h4 className="text-xs font-bold text-white flex items-center gap-1.5">
-                  <Cloud className="w-4 h-4 text-cyan-400" />
-                  클라우드 DB 실시간 동기화 (GitHub Gist Cloud)
-                </h4>
+            {/* Cloud Sync */}
+            <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-2.5">
+              <div className="text-xs font-bold text-white">
+                클라우드 데이터 동기화
               </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              <div className="grid grid-cols-2 gap-2">
                 <button
                   disabled={cloudLoading}
                   onClick={handleCloudPull}
-                  className="flex items-center justify-center gap-2 p-3 rounded-xl bg-cyan-600/20 hover:bg-cyan-600/30 border border-cyan-500/40 text-cyan-200 text-xs font-bold cursor-pointer"
+                  className="flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl bg-cyan-600/20 border border-cyan-500/40 text-cyan-200 text-xs font-bold cursor-pointer"
                 >
-                  <CloudDownload className="w-4 h-4 text-cyan-400" />
-                  클라우드에서 최신 데이터 불러오기
+                  <CloudDownload className="w-4 h-4" />
+                  클라우드 불러오기
                 </button>
-
                 <button
                   disabled={cloudLoading}
                   onClick={handleCloudPush}
-                  className="flex items-center justify-center gap-2 p-3 rounded-xl bg-fuchsia-600/20 hover:bg-fuchsia-600/30 border border-fuchsia-500/40 text-fuchsia-200 text-xs font-bold cursor-pointer"
+                  className="flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl bg-fuchsia-600/20 border border-fuchsia-500/40 text-fuchsia-200 text-xs font-bold cursor-pointer"
                 >
-                  <CloudUpload className="w-4 h-4 text-fuchsia-400" />
-                  클라우드로 현재 데이터 업로드
+                  <CloudUpload className="w-4 h-4" />
+                  클라우드 저장하기
                 </button>
               </div>
 
+              <button
+                onClick={handleCopySyncLink}
+                className="w-full py-2 px-3 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-200 text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer"
+              >
+                {syncLinkCopied ? (
+                  <Check className="w-3.5 h-3.5 text-emerald-400" />
+                ) : (
+                  <Link2 className="w-3.5 h-3.5 text-cyan-400" />
+                )}
+                {syncLinkCopied
+                  ? '데이터 포함 링크 복사됨!'
+                  : '현재 데이터 포함 클라우드 링크 복사 (카톡 전송용)'}
+              </button>
+
               {cloudStatus && (
-                <div className="p-2.5 rounded-lg bg-slate-900 border border-slate-800 text-xs text-amber-300 font-medium">
+                <div className="text-xs text-amber-300 font-medium">
                   {cloudStatus}
                 </div>
               )}
 
-              <div className="space-y-2 pt-2 border-t border-slate-800/80">
-                <div>
-                  <label className="block text-[11px] text-slate-400 mb-1">
-                    클라우드 Gist ID (불러오기는 토큰 없이 즉시 가능)
-                  </label>
-                  <input
-                    type="text"
-                    value={gistId}
-                    onChange={(e) => setGistId(e.target.value)}
-                    className="w-full px-3 py-1.5 bg-slate-900 border border-slate-800 rounded-lg text-xs text-slate-200 font-mono"
-                  />
-                </div>
-                <div>
-                  <label className="block text-[11px] text-slate-400 mb-1">
-                    클라우드 업로드용 GitHub Token (선택 - 갤럭시에서 직접 업로드 시 1회 입력, 기기에만 안전 저장)
-                  </label>
-                  <input
-                    type="password"
-                    placeholder="ghp_... 또는 gho_... (입력 시 자동 클라우드 저장 활성화)"
-                    value={githubToken}
-                    onChange={(e) => {
-                      setGithubToken(e.target.value);
-                      saveCloudConfig({ gistId, githubToken: e.target.value });
-                    }}
-                    className="w-full px-3 py-1.5 bg-slate-900 border border-slate-800 rounded-lg text-xs text-slate-200 font-mono"
-                  />
-                </div>
+              <div className="pt-2 border-t border-slate-800 space-y-2">
+                <input
+                  type="text"
+                  placeholder="Gist ID"
+                  value={gistId}
+                  onChange={(e) => setGistId(e.target.value)}
+                  className="w-full px-2.5 py-1.5 bg-slate-900 border border-slate-800 rounded text-[11px] text-slate-300 font-mono"
+                />
+                <input
+                  type="password"
+                  placeholder="갤럭시에서 직접 클라우드 업로드 시 GitHub Token 1회 입력"
+                  value={githubToken}
+                  onChange={(e) => {
+                    setGithubToken(e.target.value);
+                    saveCloudConfig({ gistId, githubToken: e.target.value });
+                  }}
+                  className="w-full px-2.5 py-1.5 bg-slate-900 border border-slate-800 rounded text-[11px] text-slate-300 font-mono"
+                />
               </div>
             </div>
           </div>
         )}
 
-        {activeMode === 'export-text' && (
+        {tab === 'kakao' && (
           <div className="space-y-3">
-            <p className="text-xs text-slate-400">
-              현재 등록된 카드·알뜰폰·자동이체 내역을 카카오톡 나와의 채팅에 붙여넣기 좋은 텍스트로 자동 생성합니다.
-            </p>
             <textarea
               readOnly
               rows={11}
               value={summaryText}
-              className="w-full p-3.5 bg-slate-950 border border-slate-800 rounded-xl text-xs text-slate-200 font-mono leading-relaxed"
+              className="w-full p-3 bg-slate-950 border border-slate-800 rounded-xl text-xs text-slate-200 font-mono"
             />
-            <div className="flex justify-end">
-              <button
-                onClick={() => handleCopy(summaryText)}
-                className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold cursor-pointer"
-              >
-                {copied ? (
-                  <Check className="w-4 h-4" />
-                ) : (
-                  <Copy className="w-4 h-4" />
-                )}
-                {copied ? '클립보드에 복사됨!' : '요약 텍스트 전체 복사'}
-              </button>
-            </div>
+            <button
+              onClick={() => handleCopy(summaryText)}
+              className="w-full py-2.5 rounded-xl bg-indigo-600 text-white text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer"
+            >
+              {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+              {copied ? '복사 완료!' : '카카오톡 메모 형식으로 전체 복사'}
+            </button>
           </div>
         )}
 
-        {activeMode === 'import-memo' && (
-          <div className="space-y-4">
-            <div className="flex items-center justify-between">
-              <p className="text-xs text-slate-400">
-                카카오톡 메모 형식의 텍스트를 붙여넣으면 카드/알뜰폰/자동이체 항목을 자동 추출합니다.
-              </p>
-              <button
-                type="button"
-                onClick={() => setMemoInput(RAW_KAKAO_MEMO)}
-                className="text-xs text-indigo-400 hover:underline cursor-pointer"
-              >
-                예시(원본 메모) 불러오기
-              </button>
-            </div>
-            <textarea
-              rows={7}
-              value={memoInput}
-              onChange={(e) => setMemoInput(e.target.value)}
-              placeholder={`예시:\n하나 제이드 25.8.7 발급 (혜택제공 12개월 해지금지 -> 26.12.31)\n자동이체정리\nmgs\n2. 네이버 멤버쉽 4500 /25일`}
-              className="w-full p-3.5 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white font-mono"
-            />
-
-            {previewParsed && (
-              <div className="p-3.5 rounded-xl bg-slate-950 border border-indigo-500/30 space-y-2 text-xs">
-                <div className="font-bold text-indigo-300 flex items-center gap-1.5">
-                  <Sparkles className="w-4 h-4" />
-                  인식된 항목 미리보기: 카드 {previewParsed.cards.length}건 · 알뜰폰{' '}
-                  {previewParsed.mvnos.length}건 · 자동이체{' '}
-                  {previewParsed.transfers.length}건
-                </div>
-                <div className="flex justify-end">
-                  <button
-                    onClick={() => {
-                      onImportParsed(previewParsed);
-                      onClose();
-                    }}
-                    className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold cursor-pointer"
-                  >
-                    인식된 항목 추가하기
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-
-        {activeMode === 'backup' && (
-          <div className="space-y-4">
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        {tab === 'backup' && (
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 gap-2">
               <button
                 onClick={handleDownloadJson}
-                className="flex items-center justify-center gap-2 p-4 rounded-xl bg-slate-950 hover:bg-slate-800 border border-slate-800 text-xs font-bold text-slate-200 cursor-pointer"
+                className="flex items-center justify-center gap-1.5 p-3 rounded-xl bg-slate-950 border border-slate-800 text-xs font-bold text-slate-200 cursor-pointer"
               >
                 <Download className="w-4 h-4 text-indigo-400" />
-                JSON 파일로 전체 백업 다운로드
+                JSON 백업 저장
               </button>
-
-              <label className="flex items-center justify-center gap-2 p-4 rounded-xl bg-slate-950 hover:bg-slate-800 border border-slate-800 text-xs font-bold text-slate-200 cursor-pointer">
+              <label className="flex items-center justify-center gap-1.5 p-3 rounded-xl bg-slate-950 border border-slate-800 text-xs font-bold text-slate-200 cursor-pointer">
                 <Upload className="w-4 h-4 text-emerald-400" />
-                JSON 백업 파일 불러오기(복원)
+                JSON 복원
                 <input
                   type="file"
                   accept=".json"
@@ -491,32 +386,18 @@ export const SmartMemoModal: React.FC<SmartMemoModalProps> = ({
               </label>
             </div>
 
-            <div className="p-4 rounded-xl bg-slate-950 border border-slate-800">
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-xs font-bold text-slate-300">
-                  최초 첨부된 카카오톡 원본 메모
-                </span>
-                <button
-                  onClick={() => {
-                    if (
-                      window.confirm(
-                        '모든 데이터를 최초 카카오톡 메모 기준 초기 상태로 되돌리시겠습니까?'
-                      )
-                    ) {
-                      onResetToInitial();
-                      onClose();
-                    }
-                  }}
-                  className="flex items-center gap-1 text-xs text-rose-400 hover:underline cursor-pointer"
-                >
-                  <RotateCcw className="w-3.5 h-3.5" />
-                  초기 데이터로 리셋
-                </button>
-              </div>
-              <pre className="text-[11px] text-slate-400 font-mono whitespace-pre-wrap bg-slate-900 p-3 rounded-lg border border-slate-800 max-h-40 overflow-y-auto">
-                {RAW_KAKAO_MEMO}
-              </pre>
-            </div>
+            <button
+              onClick={() => {
+                if (window.confirm('초기 메모 데이터로 리셋할까요?')) {
+                  onResetToInitial();
+                  onClose();
+                }
+              }}
+              className="w-full py-2.5 rounded-xl bg-rose-950/60 border border-rose-500/30 text-rose-300 text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              초기 데이터로 리셋
+            </button>
           </div>
         )}
       </div>
