@@ -1,0 +1,18 @@
+{
+  "name": "Hi-Credit 카드·알뜰폰·구독 매니저",
+  "short_name": "Hi-Credit",
+  "description": "카드 신규이벤트(해지금지/쿨타임), 알뜰폰 번이 타이밍, 자동이체 및 AI 구독 통합 관리 앱",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#020617",
+  "theme_color": "#020617",
+  "icons": [
+    {
+      "src": "./icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

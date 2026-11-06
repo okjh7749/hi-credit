@@ -1,0 +1,9 @@
+{
+  "appId": "com.hicredit.galaxy",
+  "appName": "Hi-Credit",
+  "webDir": "dist",
+  "bundledWebRuntime": false,
+  "server": {
+    "androidScheme": "https"
+  }
+}

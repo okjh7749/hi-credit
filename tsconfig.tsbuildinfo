@@ -1,0 +1,1 @@
+{"root":["./src/app.tsx","./src/initialdata.ts","./src/main.tsx","./src/types.ts","./src/components/autotransfertab.tsx","./src/components/cardmanagertab.tsx","./src/components/dashboardtab.tsx","./src/components/mvnomanagertab.tsx","./src/components/smartmemomodal.tsx","./src/utils/dateutils.ts","./src/utils/memoparser.ts","./src/utils/storage.ts"],"version":"5.7.3"}
